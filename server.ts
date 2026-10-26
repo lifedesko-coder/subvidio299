@@ -271,7 +271,26 @@ async function startServer() {
       'gemini-3.1-flash-lite',
       'gemini-3.5-flash-lite',
     ];
-    const modelQueue = Array.from(new Set(candidateModels));
+    const rawQueue = Array.from(new Set(candidateModels));
+
+    const MODEL_API_MAP: Record<string, string[]> = {
+      'gemini-3.1-pro-preview': ['gemini-3.1-pro-preview', 'gemini-3.8-flash', 'gemini-flash-latest'],
+      'gemini-2.5-pro': ['gemini-2.5-pro', 'gemini-3.8-flash', 'gemini-flash-latest'],
+      'gemini-3.8-flash': ['gemini-3.8-flash', 'gemini-flash-latest'],
+      'gemini-3.6-flash': ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-flash-latest'],
+      'gemini-3.5-flash': ['gemini-3.5-flash', 'gemini-flash-latest', 'gemini-3.8-flash'],
+      'gemini-flash-lite-latest': ['gemini-flash-lite-latest', 'gemini-3.1-flash-lite'],
+      'gemini-3.1-flash-lite': ['gemini-3.1-flash-lite', 'gemini-flash-lite-latest'],
+      'gemini-3.5-flash-lite': ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-flash-lite-latest'],
+    };
+
+    const safetySettings = [
+      { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+      { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+      { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+      { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+      { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' },
+    ];
 
     const audioBuffer = fs.readFileSync(params.audioPath);
     const isLargeFile = audioBuffer.length > 15 * 1024 * 1024;
@@ -312,81 +331,98 @@ async function startServer() {
 
     let lastError: any = null;
 
-    for (let mIdx = 0; mIdx < modelQueue.length; mIdx++) {
-      const currentModel = modelQueue[mIdx];
-      const isFallback = currentModel !== primaryModel;
+    for (let mIdx = 0; mIdx < rawQueue.length; mIdx++) {
+      const candidateName = rawQueue[mIdx];
+      const apiTargets = MODEL_API_MAP[candidateName] || [candidateName];
 
-      try {
-        console.log(`[Gemini] Attempting ${currentModel}${isFallback ? ' [FALLBACK MODEL]' : ''}...`);
+      for (const currentModel of apiTargets) {
+        const isFallback = currentModel !== primaryModel;
+        const maxTokens = currentModel.includes('lite') ? 8192 : 65536;
 
-        const response = await client.models.generateContent({
-          model: currentModel,
-          contents: [
-            {
-              role: 'user',
-              parts,
-            },
-          ],
-          config: {
-            systemInstruction: params.systemInstruction,
-            responseMimeType: 'application/json',
-            temperature: 0.2,
-          },
-        });
+        try {
+          console.log(`[Gemini] Attempting ${currentModel}${isFallback ? ' [FALLBACK MODEL]' : ''}...`);
 
-        const responseText = response.text || '[]';
-        console.log(`[Gemini] Success using model: ${currentModel}`);
-        return {
-          responseText,
-          modelUsed: currentModel,
-          fallbackOccurred: isFallback,
-          fallbackNotice: isFallback
-            ? `تم تحويل المعالجة بنجاح إلى نموذج ${currentModel} لتجاوز الضغط المؤقت على ${primaryModel}.`
-            : undefined,
-        };
-      } catch (err: any) {
-        lastError = err;
-        const errString = String(err?.message || err || '');
-        console.log(`[Gemini] Note: ${currentModel} encountered transient status: ${errString.includes('503') ? '503 High Demand' : errString.includes('429') ? '429 Rate Limit' : 'Busy'}`);
-
-        const isHighDemand =
-          errString.includes('503') ||
-          errString.includes('high demand') ||
-          errString.includes('UNAVAILABLE') ||
-          errString.includes('overloaded');
-
-        // If it's a transient 503 spike, attempt ONE short retry on this model
-        if (isHighDemand) {
-          try {
-            console.log(`[Gemini] Retrying 503 on ${currentModel} in 1200ms...`);
-            await new Promise((r) => setTimeout(r, 1200));
-            const retryResponse = await client.models.generateContent({
-              model: currentModel,
-              contents: [{ role: 'user', parts }],
-              config: {
-                systemInstruction: params.systemInstruction,
-                responseMimeType: 'application/json',
-                temperature: 0.2,
+          const response = await client.models.generateContent({
+            model: currentModel,
+            contents: [
+              {
+                role: 'user',
+                parts,
               },
-            });
-            const responseText = retryResponse.text || '[]';
-            console.log(`[Gemini] Success on retry using ${currentModel}`);
-            return {
-              responseText,
-              modelUsed: currentModel,
-              fallbackOccurred: isFallback,
-              fallbackNotice: isFallback
-                ? `تم تحويل المعالجة بنجاح إلى نموذج ${currentModel}.`
-                : undefined,
-            };
-          } catch (retryErr: any) {
-            lastError = retryErr;
-            console.log(`[Gemini] Retry bypassed for ${currentModel}. Switching to next fallback model...`);
-          }
-        }
+            ],
+            config: {
+              systemInstruction: params.systemInstruction,
+              responseMimeType: 'application/json',
+              temperature: 0.1,
+              maxOutputTokens: maxTokens,
+              safetySettings: safetySettings as any,
+            },
+          });
 
-        // On 429 quota exhaustion or failed 503, immediately proceed to the next fallback model in queue
-        continue;
+          const responseText = response.text || '[]';
+          console.log(`[Gemini] Success using model: ${currentModel}`);
+          return {
+            responseText,
+            modelUsed: candidateName,
+            fallbackOccurred: isFallback,
+            fallbackNotice: isFallback
+              ? `تم تحويل المعالجة بنجاح إلى نموذج ${currentModel} لتجاوز الضغط المؤقت على ${primaryModel}.`
+              : undefined,
+          };
+        } catch (err: any) {
+          lastError = err;
+          const errString = String(err?.message || err || '');
+          console.log(`[Gemini] Note: ${currentModel} encountered status: ${errString.includes('503') ? '503 High Demand' : errString.includes('429') ? '429 Rate Limit' : errString.includes('404') ? '404 Not Found' : errString.substring(0, 80)}`);
+
+          if (errString.includes('404') || errString.includes('NOT_FOUND')) {
+            continue;
+          }
+
+          const isHighDemand =
+            errString.includes('503') ||
+            errString.includes('high demand') ||
+            errString.includes('UNAVAILABLE') ||
+            errString.includes('overloaded');
+
+          // If it's a transient 503 spike, attempt ONE short retry on this model
+          if (isHighDemand) {
+            try {
+              console.log(`[Gemini] Retrying 503 on ${currentModel} in 1500ms...`);
+              await new Promise((r) => setTimeout(r, 1500));
+              const retryResponse = await client.models.generateContent({
+                model: currentModel,
+                contents: [{ role: 'user', parts }],
+                config: {
+                  systemInstruction: params.systemInstruction,
+                  responseMimeType: 'application/json',
+                  temperature: 0.1,
+                  maxOutputTokens: maxTokens,
+                  safetySettings: safetySettings as any,
+                },
+              });
+              const responseText = retryResponse.text || '[]';
+              console.log(`[Gemini] Success on retry using ${currentModel}`);
+              return {
+                responseText,
+                modelUsed: candidateName,
+                fallbackOccurred: isFallback,
+                fallbackNotice: isFallback
+                  ? `تم تحويل المعالجة بنجاح إلى نموذج ${currentModel}.`
+                  : undefined,
+              };
+            } catch (retryErr: any) {
+              lastError = retryErr;
+              console.log(`[Gemini] Retry bypassed for ${currentModel}. Switching to next fallback model...`);
+            }
+          }
+
+          if (errString.includes('429') || errString.includes('RESOURCE_EXHAUSTED')) {
+            console.log('[Gemini] Rate limit hit, pausing 5s before fallback...');
+            await new Promise((r) => setTimeout(r, 5000));
+          }
+
+          continue;
+        }
       }
     }
 

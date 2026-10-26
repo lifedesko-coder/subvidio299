@@ -641,6 +641,42 @@ def translate_bollywood_media(
         "gemini-3.5-flash-lite",    # 8. ثامناً: منيع ضد الضغط وفائق السرعة
     ]
 
+    # خريطة توافق النماذج مع Google Gemini API لضمان عدم فشل الاتصال بسبب تسمية قديمة أو تجريبية
+    MODEL_API_MAP = {
+        "gemini-3.1-pro-preview": ["gemini-3.1-pro-preview", "gemini-3.8-flash", "gemini-flash-latest"],
+        "gemini-2.5-pro": ["gemini-2.5-pro", "gemini-3.8-flash", "gemini-flash-latest"],
+        "gemini-3.8-flash": ["gemini-3.8-flash", "gemini-flash-latest"],
+        "gemini-3.6-flash": ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-flash-latest"],
+        "gemini-3.5-flash": ["gemini-3.5-flash", "gemini-flash-latest", "gemini-3.8-flash"],
+        "gemini-flash-lite-latest": ["gemini-flash-lite-latest", "gemini-3.1-flash-lite"],
+        "gemini-3.1-flash-lite": ["gemini-3.1-flash-lite", "gemini-flash-lite-latest"],
+        "gemini-3.5-flash-lite": ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-lite-latest"],
+    }
+
+    # إعدادات الأمان السينمائية لضمان عدم حجب المشاهد الدرامية أو العنيفة أو الصراخ
+    safety_settings = [
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+    ]
+
     # استخراج النموذج الأولي المختار وترتيب القائمة
     selected_clean = "gemini-3.1-pro-preview"
     for opt in available_pool:
@@ -663,47 +699,86 @@ def translate_bollywood_media(
 
     for idx, candidate_model in enumerate(models_to_try):
         model_success = False
-        # محاولة أولية + محاولتي إعادة ذكية عند حدوث 503 (Spike Backoff)
-        for attempt in range(3):
-            try:
-                attempt_note = "" if attempt == 0 else f" 🔄 (إعادة المحاولة {attempt}/2 بعد زوال الضغط)..."
-                status_placeholder.info(f"⚡ جاري تحليل وترجمة الصوت سينمائياً عبر النموذج ({idx + 1}/{len(models_to_try)}): **{candidate_model}**{attempt_note}")
-                
-                response = client.models.generate_content(
-                    model=candidate_model,
-                    contents=[uploaded_gemini_file, prompt],
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        response_mime_type="application/json",
-                        temperature=0.1,  # درجة منخفضة جداً لمنع الهلوسة والوصف العشوائي للأصوات
-                        max_output_tokens=65536,  # سعة فائقة لتغطية كامل مدة الحلقة دون توقف في المنتصف
+        target_api_models = MODEL_API_MAP.get(candidate_model, [candidate_model])
+
+        for api_model_name in target_api_models:
+            # محاولة أولية + محاولات إعادة عند حدوث 503 أو 429
+            for attempt in range(2):
+                try:
+                    attempt_note = "" if attempt == 0 else f" 🔄 (إعادة المحاولة {attempt}/1)..."
+                    display_name = candidate_model if api_model_name == candidate_model else f"{candidate_model} (بديل: {api_model_name})"
+                    status_placeholder.info(f"⚡ جاري تحليل وترجمة الصوت سينمائياً عبر النموذج ({idx + 1}/{len(models_to_try)}): **{display_name}**{attempt_note}")
+                    
+                    # النماذج الخفيفة تدعم كحد أقصى 8192 توكن
+                    token_limit = 8192 if "lite" in api_model_name.lower() else 65536
+                    
+                    response = client.models.generate_content(
+                        model=api_model_name,
+                        contents=[uploaded_gemini_file, prompt],
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            response_mime_type="application/json",
+                            temperature=0.1,  # درجة منخفضة جداً لمنع الهلوسة والوصف العشوائي للأصوات
+                            max_output_tokens=token_limit,  # سعة فائقة لتغطية كامل مدة الحلقة دون توقف
+                            safety_settings=safety_settings,
+                        )
                     )
-                )
-                
-                # التحقق الصارم من وجود مخرجات صالحة
-                raw_text_cand = (response.text or "").strip()
-                if not raw_text_cand:
-                    raise ValueError(f"النموذج {candidate_model} أعاد رداً نصياً فارغاً.")
-                
-                parsed_cand = safe_parse_cues_json(raw_text_cand)
-                if not parsed_cand or len(parsed_cand) == 0:
-                    raise ValueError(f"النموذج {candidate_model} لم يستخرج أسطر ترجمة صالحة من هذا الملف الصوتي.")
-                
-                raw_cues = parsed_cand
-                successful_model = candidate_model
-                status_placeholder.success(f"🎉 تم الاتصال بنجاح وتوليد الترجمة عبر النموذج: **{candidate_model}**")
-                model_success = True
-                break
-            except Exception as e:
-                last_err = e
-                err_str = str(e)
-                # إذا كان الخطأ 503 (ضغط مؤقت) ولسنا في المحاولة الأخيرة، ننتظر 3 ثوانٍ ونعيد المحاولة
-                if attempt < 2 and ("503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str or "overloaded" in err_str):
-                    status_placeholder.warning(f"⏳ النموذج `{candidate_model}` واجه ضغطاً لحظياً (503). جاري الانتظار ثوانٍ معدودة لإعادة المحاولة...")
-                    time.sleep(3.0)
-                    continue
-                else:
+                    
+                    # التحقق الصارم من وجود مخرجات صالحة
+                    raw_text_cand = ""
+                    if hasattr(response, "text") and response.text:
+                        raw_text_cand = response.text.strip()
+                    elif hasattr(response, "candidates") and response.candidates:
+                        for cand in response.candidates:
+                            if hasattr(cand, "content") and hasattr(cand.content, "parts"):
+                                for part in cand.content.parts:
+                                    if hasattr(part, "text") and part.text:
+                                        raw_text_cand += part.text
+                        raw_text_cand = raw_text_cand.strip()
+
+                    if not raw_text_cand:
+                        raise ValueError(f"النموذج {candidate_model} أعاد رداً نصياً فارغاً.")
+                    
+                    parsed_cand = safe_parse_cues_json(raw_text_cand)
+                    if not parsed_cand or len(parsed_cand) == 0:
+                        raise ValueError(f"النموذج {candidate_model} لم يستخرج أسطر ترجمة صالحة من هذا الملف الصوتي.")
+                    
+                    raw_cues = parsed_cand
+                    successful_model = candidate_model
+                    status_placeholder.success(f"🎉 تم الاتصال بنجاح وتوليد الترجمة عبر النموذج: **{candidate_model}**")
+                    model_success = True
                     break
+                except Exception as e:
+                    last_err = e
+                    err_str = str(e)
+                    
+                    # خطأ 404 (النموذج غير موجود في الحساب) -> الانتقال فوراً للبديل في خريطة التوافق
+                    if "404" in err_str or "NOT_FOUND" in err_str or "not found" in err_str.lower():
+                        break
+                    
+                    # خطأ 429 (تجاوز معدل التوكنات المؤقت في الخطة المجانية) -> انتظار 8 ثوانٍ للتفريغ
+                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                        if attempt == 0:
+                            status_placeholder.warning(f"⏳ تم الوصول إلى الحد المؤقت للطلبات (Rate Limit 429). جاري الانتظار 8 ثوانٍ لتفريغ الحصة والمتابعة...")
+                            time.sleep(8.0)
+                            continue
+                        else:
+                            break
+
+                    # خطأ 503 (ضغط مؤقت على الخوادم) -> انتظار 3 ثوانٍ
+                    if "503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str or "overloaded" in err_str:
+                        if attempt == 0:
+                            status_placeholder.warning(f"⏳ النموذج `{candidate_model}` واجه ضغطاً لحظياً (503). جاري الانتظار 3 ثوانٍ لإعادة المحاولة...")
+                            time.sleep(3.0)
+                            continue
+                        else:
+                            break
+                    
+                    # خطأ آخر -> الانتقال للبديل
+                    break
+
+            if model_success:
+                break
 
         if model_success and len(raw_cues) > 0:
             break
@@ -715,7 +790,7 @@ def translate_bollywood_media(
                 f"⚠️ تعذر استخدام `{candidate_model}`. "
                 f"جاري التحويل التلقائي فوراً إلى النموذج البديل `{next_model}` وفق الترتيب المعتمد..."
             )
-            time.sleep(1.2)
+            time.sleep(1.5)
             continue
         else:
             status_placeholder.error(f"❌ تعذرت الاستجابة بعد تجربة جميع النماذج ({', '.join(models_to_try)}).")
@@ -727,15 +802,7 @@ def translate_bollywood_media(
     # المعالجة الزمنية الحتمية وضبط الفواصل
     processed = []
     for item in raw_cues:
-        start = parse_timecode_to_seconds(item.get("timecodeStart", "00:00.00"))
-        end = parse_timecode_to_seconds(item.get("timecodeEnd", "00:00.00"))
-
-        # حساب مدة القراءة السينمائية المريحة لتفادي الاختفاء الخاطف للسطر (CPS Reading Comfort)
-        comfortable_duration = max(min_duration, min(max_duration, len(arabic) * 0.065))
-        if end <= start or (end - start) < comfortable_duration:
-            end = start + comfortable_duration
-
-        # دعم جميع التسميات المحتملة للمفاتيح في الـ JSON
+        # استخراج النصوص أولاً لتجنب أي خطأ في تعريف المتغيرات
         arabic = (
             item.get("arabicTranslation")
             or item.get("arabic")
@@ -746,6 +813,14 @@ def translate_bollywood_media(
         ).strip()
         hindi = (item.get("originalHindi") or item.get("hindi") or "").strip()
         cue_type = item.get("type", "dialogue")
+
+        start = parse_timecode_to_seconds(item.get("timecodeStart", "00:00.00"))
+        end = parse_timecode_to_seconds(item.get("timecodeEnd", "00:00.00"))
+
+        # حساب مدة القراءة السينمائية المريحة لتفادي الاختفاء الخاطف للسطر (CPS Reading Comfort)
+        comfortable_duration = max(min_duration, min(max_duration, len(arabic) * 0.065))
+        if end <= start or (end - start) < comfortable_duration:
+            end = start + comfortable_duration
 
         # تصفية المؤثرات الصوتية والبيئية إذا كان الخيار مفعلاً
         if ignore_sound_effects:
