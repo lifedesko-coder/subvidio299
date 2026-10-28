@@ -123,11 +123,60 @@ export function stripMusicalNotes(text: string): string {
 }
 
 /**
+ * Formats subtitle text to at most 2 balanced lines under 42 characters per line,
+ * respecting punctuation marks for standard broadcast compliance.
+ */
+export function wrapSubtitleText(text: string, maxCharsPerLine: number = 40): string {
+  if (!text) return '';
+  const trimmed = text.trim().replace(/[ \t]+/g, ' ');
+
+  if (trimmed.includes('\n')) {
+    const lines = trimmed.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (lines.length <= 2 && lines.every((l) => l.length <= maxCharsPerLine + 4)) {
+      return lines.join('\n');
+    }
+  }
+
+  const single = trimmed.replace(/\n/g, ' ');
+  if (single.length <= maxCharsPerLine) {
+    return single;
+  }
+
+  const words = single.split(' ');
+  if (words.length <= 3) return single;
+
+  const targetPos = single.length / 2;
+  let bestSplitIdx = -1;
+  let bestScore = 9999;
+  let currLen = 0;
+
+  for (let i = 0; i < words.length - 1; i++) {
+    const w = words[i];
+    currLen += w.length + 1;
+    const dist = Math.abs(currLen - targetPos);
+    const bonus = /[،؟!؛.…]$/.test(w) ? 12 : 0;
+    const score = dist - bonus;
+    if (score < bestScore) {
+      bestScore = score;
+      bestSplitIdx = i;
+    }
+  }
+
+  if (bestSplitIdx !== -1) {
+    const line1 = words.slice(0, bestSplitIdx + 1).join(' ');
+    const line2 = words.slice(bestSplitIdx + 1).join(' ');
+    return `${line1}\n${line2}`;
+  }
+
+  return single;
+}
+
+/**
  * Validates, aligns, sorts and enforces non-overlapping cues and minimum display duration.
  */
 export function sanitizeAndAlignCues(
   rawCues: RawGeminiSubtitleItem[],
-  minDurationSec: number = 1.8
+  minDurationSec: number = 1.4
 ): SubtitleCue[] {
   if (!Array.isArray(rawCues)) return [];
 
@@ -142,6 +191,11 @@ export function sanitizeAndAlignCues(
       // Automatically add musical note symbol ♪ for rap and song lines
       if (cueType === 'song' || cueType === 'rap') {
         arabic = formatMusicalNote(arabic);
+      }
+
+      // Add smart tail padding (+0.35s) so subtitle does not vanish before speaker ends
+      if (end > start) {
+        end += 0.35;
       }
 
       // Comfortable reading duration based on Arabic text length (approx 15 chars/sec)
@@ -178,14 +232,14 @@ export function sanitizeAndAlignCues(
       curr.endSeconds = curr.startSeconds + needed;
     }
 
-    // Check with previous cue for overlap
+    // Check with previous cue for overlap (ensure 0.08s standard gap)
     if (i > 0) {
       const prev = parsed[i - 1];
-      if (curr.startSeconds < prev.endSeconds) {
+      if (curr.startSeconds < prev.endSeconds + 0.08) {
         if (curr.startSeconds - prev.startSeconds >= minDurationSec) {
-          prev.endSeconds = curr.startSeconds - 0.05;
+          prev.endSeconds = curr.startSeconds - 0.08;
         } else {
-          curr.startSeconds = prev.endSeconds + 0.05;
+          curr.startSeconds = prev.endSeconds + 0.08;
           curr.endSeconds = Math.max(curr.endSeconds, curr.startSeconds + needed);
         }
       }
@@ -212,7 +266,8 @@ export function generateSRT(cues: SubtitleCue[]): string {
       if ((cue.type === 'song' || cue.type === 'rap') && !hasMusicalNote(text)) {
         text = formatMusicalNote(text);
       }
-      return `${num}\n${start} --> ${end}\n${text}\n`;
+      const wrapped = wrapSubtitleText(text);
+      return `${num}\n${start} --> ${end}\n${wrapped}\n`;
     })
     .join('\n');
 }

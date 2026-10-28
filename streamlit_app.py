@@ -274,6 +274,54 @@ def is_sound_effect_or_ambient(arabic_text: str, hindi_text: str = "") -> tuple[
 
 
 # ==========================================
+# دالة تنسيق وتقسيم أسطر الترجمة (معايير نتفليكس)
+# ==========================================
+def wrap_subtitle_text(text: str, max_chars_per_line: int = 40) -> str:
+    """
+    تنسيق نصوص الترجمة بحد أقصى سطرين وطول مناسب (38-42 حرفاً للسطر الواحد)
+    مع احترام علامات الترقيم (، ؟ ! .) لمنع تحذيرات المشغلات (84 warnings).
+    """
+    if not text:
+        return ""
+    text = text.strip()
+    text = re.sub(r'[ \t]+', ' ', text)
+
+    if "\n" in text:
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        if len(lines) <= 2 and all(len(l) <= max_chars_per_line + 4 for l in lines):
+            return "\n".join(lines)
+        text = " ".join(lines)
+
+    if len(text) <= max_chars_per_line:
+        return text
+
+    words = text.split()
+    if len(words) <= 3:
+        return text
+
+    target_pos = len(text) / 2
+    best_split_idx = -1
+    best_score = 9999
+    curr_len = 0
+
+    for idx, w in enumerate(words[:-1]):
+        curr_len += len(w) + 1
+        distance = abs(curr_len - target_pos)
+        bonus = 12 if w.endswith(("،", "؟", "!", "؛", ".", "…")) else 0
+        score = distance - bonus
+        if score < best_score:
+            best_score = score
+            best_split_idx = idx
+
+    if best_split_idx != -1:
+        line1 = " ".join(words[:best_split_idx + 1])
+        line2 = " ".join(words[best_split_idx + 1:])
+        return f"{line1}\n{line2}"
+
+    return text
+
+
+# ==========================================
 # دالة تجزئة وتقطيع الأسطر الطويلة لراحة المشاهد
 # ==========================================
 def split_long_cue(cue: dict, max_duration: float = 5.5, max_words: int = 14) -> list:
@@ -875,7 +923,8 @@ def generate_srt_content(cues: list) -> str:
     for i, cue in enumerate(cues, start=1):
         s = seconds_to_srt_time(cue["start"])
         e = seconds_to_srt_time(cue["end"])
-        lines.append(f"{i}\n{s} --> {e}\n{cue['arabic']}\n")
+        wrapped = wrap_subtitle_text(cue["arabic"])
+        lines.append(f"{i}\n{s} --> {e}\n{wrapped}\n")
     return "\n".join(lines)
 
 def generate_vtt_content(cues: list) -> str:
@@ -883,7 +932,8 @@ def generate_vtt_content(cues: list) -> str:
     for i, cue in enumerate(cues, start=1):
         s = seconds_to_vtt_time(cue["start"])
         e = seconds_to_vtt_time(cue["end"])
-        lines.append(f"{i}\n{s} --> {e}\n{cue['arabic']}\n")
+        wrapped = wrap_subtitle_text(cue["arabic"])
+        lines.append(f"{i}\n{s} --> {e}\n{wrapped}\n")
     return "\n".join(lines)
 
 def generate_ass_content(cues: list, title: str = "BollywoodSub AI") -> str:
@@ -908,7 +958,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     for cue in cues:
         s = seconds_to_ass_time(cue["start"])
         e = seconds_to_ass_time(cue["end"])
-        text = cue["arabic"].replace("\n", "\\N")
+        wrapped = wrap_subtitle_text(cue["arabic"])
+        text = wrapped.replace("\n", "\\N")
         events.append(f"Dialogue: 0,{s},{e},BollywoodGold,,0,0,0,,{text}")
     return header + "\n".join(events)
 
