@@ -403,27 +403,28 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return header + "\n".join(events)
 
 # ==========================================
-# محرك الذكاء الاصطناعي مع التبديل التلقائي الذكي (Gemini API)
+# محرك الذكاء الاصطناعي مع ترتيب النماذج المفضل
 # ==========================================
-# ترتيب النماذج مع وضع الأكثر استقراراً وجودة في المقدمة
 AVAILABLE_MODELS = [
-    "gemini-3.5-flash",         # مستقر وسريع جداً وقدرة 64k توكن تغطي حلقات كاملة (22+ دقيقة)
-    "gemini-3.6-flash",         # دقة سينمائية واستقرار عالي
-    "gemini-3.8-flash",         # أحدث إصدار فائق البلاغة
-    "gemini-flash-latest",      # أحدث إصدار فلاش مستقر
-    "gemini-3.1-pro-preview",   # نموذج احترافي عميق
-    "gemini-flash-lite-latest", # خفيف للمقاطع القصيرة
-    "gemini-3.1-flash-lite",    # خفيف
+    "gemini-3.1-pro-preview",   # للتحليل والاستيعاب
+    "gemini-2.5-pro",           # للتفاصيل المعقدة
+    "gemini-3.8-flash",         # للأعلى بلاغة ودقة
+    "gemini-3.6-flash",         # فائق الاستقرار وسريع
+    "gemini-3.5-flash",         # معتمد ومستقر
+    "gemini-flash-lite-latest", # إصدار خفيف
+    "gemini-3.1-flash-lite",    # سريع وخفيف
+    "gemini-3.5-flash-lite",    # نشط وفائق السرعة
 ]
 
 MODEL_FALLBACKS = {
-    "gemini-3.5-flash": ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-flash-latest"],
-    "gemini-3.6-flash": ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest"],
+    "gemini-3.1-pro-preview": ["gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-3.8-flash"],
+    "gemini-2.5-pro": ["gemini-2.5-pro", "gemini-3.8-flash", "gemini-3.6-flash"],
     "gemini-3.8-flash": ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash"],
-    "gemini-flash-latest": ["gemini-flash-latest", "gemini-3.5-flash", "gemini-3.6-flash"],
-    "gemini-3.1-pro-preview": ["gemini-3.1-pro-preview", "gemini-3.6-flash", "gemini-3.5-flash"],
-    "gemini-flash-lite-latest": ["gemini-flash-lite-latest", "gemini-3.1-flash-lite"],
-    "gemini-3.1-flash-lite": ["gemini-3.1-flash-lite", "gemini-flash-lite-latest"],
+    "gemini-3.6-flash": ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.8-flash"],
+    "gemini-3.5-flash": ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.8-flash"],
+    "gemini-flash-lite-latest": ["gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],
+    "gemini-3.1-flash-lite": ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-flash-lite-latest"],
+    "gemini-3.5-flash-lite": ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-lite-latest"],
 }
 
 def translate_media_file(
@@ -829,8 +830,8 @@ with gr.Blocks(title="BollywoodSub AI - Google Colab Edition", css=custom_css, t
             model_dropdown = gr.Dropdown(
                 label="🤖 اختيار نموذج Gemini AI",
                 choices=AVAILABLE_MODELS,
-                value="gemini-3.5-flash",
-                info="ينصح بـ gemini-3.5-flash أو gemini-3.6-flash لاستقرار تام وتغطية الحلقة بالكامل (22+ دقيقة)"
+                value="gemini-3.8-flash",
+                info="النماذج مرتبة وفق اختياراتك المخصصة (gemini-3.1-pro, gemini-2.5-pro, gemini-3.8-flash, gemini-3.6, gemini-3.5...)"
             )
 
             strict_model_cb = gr.Checkbox(
