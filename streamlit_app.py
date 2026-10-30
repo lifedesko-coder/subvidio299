@@ -9,6 +9,8 @@ import os
 import sys
 import json
 import re
+import io
+import zipfile
 import tempfile
 import subprocess
 from pathlib import Path
@@ -324,10 +326,10 @@ def wrap_subtitle_text(text: str, max_chars_per_line: int = 40) -> str:
 # ==========================================
 # دالة تجزئة وتقطيع الأسطر الطويلة لراحة المشاهد
 # ==========================================
-def split_long_cue(cue: dict, max_duration: float = 5.5, max_words: int = 14) -> list:
+def split_long_cue(cue: dict, max_duration: float = 5.5, max_words: int = 8) -> list:
     """
     تجزئة الأسطر والمونولوجات الطويلة (التي تتجاوز الحد الأقصى للمدة أو عدد الكلمات)
-    إلى عدة أسطر سينمائية متتالية مريحة لعين المشاهد، مع توزيع التوقيت بذكاء نسبي.
+    إلى عدة أسطر سينمائية متتالية مريحة لعين المشاهد، مع الالتزام بـ 6-8 كلمات كحد أقصى لمنع تكديس مشاهد الغضب والكلام السريع.
     """
     start = cue["start"]
     end = cue["end"]
@@ -338,7 +340,7 @@ def split_long_cue(cue: dict, max_duration: float = 5.5, max_words: int = 14) ->
 
     arabic_words = arabic_text.split()
     
-    # إذا كانت المدة مقبولة وعدد الكلمات معقولاً، نترك السطر كما هو
+    # إذا كانت المدة مقبولة وعدد الكلمات معقولاً (6-8 كلمات)، نترك السطر كما هو
     if total_dur <= max_duration and len(arabic_words) <= max_words:
         return [cue]
 
@@ -358,11 +360,11 @@ def split_long_cue(cue: dict, max_duration: float = 5.5, max_words: int = 14) ->
     if curr:
         merged_sentences.append(curr.strip())
 
-    # إذا كانت الجمل المقسمة قليلة جداً لكن الكلمات كثيرة، نقسم بناءً على عدد الكلمات
+    # إذا كانت الجمل المقسمة قليلة جداً لكن الكلمات كثيرة، نقسم بناءً على عدد الكلمات (بحد أقصى 4-7 كلمات للمقطع)
     final_segments = []
     if len(merged_sentences) <= 1:
         words = arabic_words
-        chunk_size = max(6, min(max_words, 10))
+        chunk_size = max(4, min(max_words, 7))
         for i in range(0, len(words), chunk_size):
             chunk = " ".join(words[i:i + chunk_size])
             if chunk:
@@ -585,23 +587,21 @@ def translate_bollywood_media(
 """
 
     fast_speech_rule = """
-- تغطية الخط الزمني بالكامل والتقاط كافة الحوارات من أول ثانية إلى آخر ثانية (Full Timeline Coverage):
-  * ترجم المقطع بشكل شامل وكامل، بداية من الثانية 00:00.00 وحتى نهاية آخر ثانية في المقطع دون أي قفز أو اختصار أو تجزئة.
-  * لا تختصر الحوارات؛ يجب استخراج وترجمة كل جملة وكل محادثة تدور بين الممثلين عبر كامل مدة الفيديو من البداية للوسط للنهاية.
-- التقاط الحوارات السريعة والمتداخلة والمقتضبة (Fast & Rapid Hindi Speech):
-  * المتحدثون بالهندية قد يتحدثون بسرعة عالية جداً، أو يتداخل كلامهم معاً، أو ينطقون عبارات خاطفة ومقتضبة جداً أو همساً (مثل: "لا يهم"، "حسناً"، "توقف"، "اسمعني"، "ماذا حدث؟").
-  * دقق سمعياً وبصرياً في حركة شفاه الممثلين في الفيديو والصوت، والتقط كل جملة أو كلمة حوار حتى لو كانت قصيرة أو سريعة جداً دون تفويت أي كلام بشري.
+- حظر قاطع لتكديس الكلام السريع والغاضب في سطر واحد (Strict Anti-Clustering for Fast & Angry Speech):
+  * في مشاهد الغضب والصراخ والكلام السريع المتواصل: يُحظر نهائياً دمج أكثر من 6 إلى 8 كلمات في سطر واحد!
+  * يُمنع منعاً باتاً دمج جمل المشهد التي تستمر 10 أو 15 ثانية في سطر واحد مدته 4 أو 5 ثوانٍ فقط ثم يختفي في صمت.
+  * قسّم الحوار المتواصل إلى أسطر قصيرة متتابعة ومقتضبة جداً (3 إلى 6 كلمات لكل سطر)، وحدد توقيت بداية ونهاية كل عبارة بدقة متزامنة مع خروج الصوت لحظة بلحظة.
+  * التغطية الزمنية الشاملة: إذا استمر الممثل في الصراخ أو الحديث من 00:10 إلى 00:22، يجب أن تولد أسطر ترجمة متتالية تغطي الفترة حتى 00:22 بالكامل ولا ينتهي توقيت السطر مبكراً ويترك الممثل يتحدث بدون ترجمة!
+  * حظر قاطع لتفويت الحوارات العاطفية والمكررة: في مشاهد الصدمة أو البكاء، عندما يكرر الممثل عبارات مقتضبة، ترجم كل كلمة ولا تهمل أي كلام بشري.
+  * أولوية مطلقة للكلام البشري فوق الموسيقى التصويرية: إذا تداخل كلام الممثل مع موسيقى تصويرية حزينة أو كمان، فالكلام البشري هو الأولوية الأولى 100%.
 """
 
     sub_segmentation_rule = """
-- التزامن الشفهي الصارم واحترام فترات الصمت الدرامية (Strict Speech-Onset Sync & Zero Lead-in Error):
-  * قاعدة تطابق البداية: يجب أن يتطابق وقت بداية السطر (timecodeStart) بدقة متناهية مع لحظة نطق أول حرف/كلمة تخرج من فم الممثل في الصوت والصورة.
-  * يمنع منعاً باتاً ظهور سطر الترجمة مبكراً أثناء صمت الممثل، أو أثناء حركته أو وقفاته ونظراته وتأملاته في المشهد قبل بدء الكلام.
-  * التقاط بداية الكلام الخافت والهمس والبكاء (Onset of Soft Speech & Whispers): في المشاهد الدرامية والعاطفية عندما يهمس الممثل أو يبكي أو يتحدث بنبرة خافتة، استمع بدقة والتقط بداية السطر (timecodeStart) فور خروج أول همسة صوتية دون تأخير، حتى بوجود موسيقى تصويرية في الخلفية.
-  * منع الاختفاء الخاطف ومنح راحة القراءة (Comfortable Reading Duration): لا تجعل السطر ينتهي بسرعة خاطفة بعد أجزاء من الثانية إذا نطق الممثل كلمة سريعة؛ يجب أن يبقى السطر معروضاً على الشاشة لمدة كافية ومريحة للقراءة باللغة العربية (بين 1.8 إلى 4.0 ثوانٍ).
-  * احترام الوقفات الدرامية بين الجمل (Dramatic Pauses): إذا نطق الممثل جملة، ثم صمت ليتأمل أو ينظر، ثم نطق جملة أخرى: افصل كل جملة في كائن مستقل (Sentence-level Cue) بتوقيتها الحقيقي، مع ترك فترة الصمت خالية تماماً من الترجمة.
-  * فصل المتحدثين في المشاهد المتداخلة والمواجهات (Overlapping Dialogue): عند تحدث شخصين في وقت واحد أو بتعاقب سريع، افصل كلامهما بوضع شرطة (-) لكل شخص في سطر منفصل.
-  * قاعدة الحد الأقصى للمدة: اجعل كل سطر قصيراً وأنيقاً ومريحاً لعين المشاهد (بين 1.8 إلى 4.5 ثوانٍ، وبحد أقصى 10 إلى 12 كلمة لكل سطر)، ولا تدمج فقرات طويلة معاً.
+- التزامن الشفهي الصارم وتوزيع الأسطر (Strict Speech-Onset & Accurate Offset):
+  * قاعدة تطابق البداية: يجب أن يتطابق وقت بداية السطر (timecodeStart) بدقة متناهية مع لحظة نطق أول حرف يخرج من فم الممثل في الصوت والصورة.
+  * يمنع منعاً باتاً ظهور سطر الترجمة مبكراً أثناء صمت الممثل قبل بدء الكلام.
+  * قاعدة إتمام نهاية الكلام: يجب أن يستمر وقت انتهاء السطر (timecodeEnd) حتى إتمام الممثل نطق آخر حرف تماماً مع نبرة صوته وإغلاق شفتيه، دون إنهاء السطر مبكراً قبل أن يفرغ الممثل من جملته.
+  * منع الاختفاء الخاطف: اجعل السطر مريحاً للقراءة بالعربية (بين 1.5 إلى 4.5 ثوانٍ، وبحد أقصى 6 إلى 8 كلمات لكل سطر في المشاهد السريعة).
 """
 
     sargam_ban_rule = """
@@ -757,8 +757,8 @@ def translate_bollywood_media(
                     display_name = candidate_model if api_model_name == candidate_model else f"{candidate_model} (بديل: {api_model_name})"
                     status_placeholder.info(f"⚡ جاري تحليل وترجمة الصوت سينمائياً عبر النموذج ({idx + 1}/{len(models_to_try)}): **{display_name}**{attempt_note}")
                     
-                    # النماذج الخفيفة تدعم كحد أقصى 8192 توكن
-                    token_limit = 8192 if "lite" in api_model_name.lower() else 65536
+                    # سعة التوكنات: 8192 هو الحد الأقصى الرسمي المعتمد من Google لكافة نماذج Gemini
+                    token_limit = 8192
                     
                     response = client.models.generate_content(
                         model=api_model_name,
@@ -865,9 +865,14 @@ def translate_bollywood_media(
         start = parse_timecode_to_seconds(item.get("timecodeStart", "00:00.00"))
         end = parse_timecode_to_seconds(item.get("timecodeEnd", "00:00.00"))
 
-        # حساب مدة القراءة السينمائية المريحة لتفادي الاختفاء الخاطف للسطر (CPS Reading Comfort)
+        # تمديد ذكي لنهاية السطر (+0.40s Tail Extension) حتى نهاية صوت الممثل ومنع الاختفاء الخاطف
+        if end <= start:
+            end = start + 2.2
+        else:
+            end = round(end + 0.40, 2)
+
         comfortable_duration = max(min_duration, min(max_duration, len(arabic) * 0.065))
-        if end <= start or (end - start) < comfortable_duration:
+        if (end - start) < comfortable_duration:
             end = start + comfortable_duration
 
         # تصفية المؤثرات الصوتية والبيئية إذا كان الخيار مفعلاً
@@ -892,8 +897,8 @@ def translate_bollywood_media(
                 "hindi": hindi,
                 "type": cue_type
             }
-            # تقطيع وتجزئة الأسطر الطويلة تلقائياً لراحة المشاهد
-            split_cues = split_long_cue(base_cue, max_duration=max_duration, max_words=12)
+            # تقطيع وتجزئة الأسطر الطويلة تلقائياً لراحة المشاهد (6-8 كلمات كحد أقصى)
+            split_cues = split_long_cue(base_cue, max_duration=max_duration, max_words=8)
             processed.extend(split_cues)
 
     processed.sort(key=lambda x: x["start"])
@@ -1274,6 +1279,23 @@ if st.session_state.cues:
     json_text = json.dumps(st.session_state.cues, ensure_ascii=False, indent=2)
 
     base_name = Path(st.session_state.processed_filename or "bollywood_subtitles").stem
+
+    # حزمة ZIP المباشرة للهواتف (لمنع فتح الملف كصفحة سوداء في المتصفح)
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+        zipf.writestr(f"{base_name}.srt", srt_text)
+        zipf.writestr(f"{base_name}.vtt", vtt_text)
+        zipf.writestr(f"{base_name}.ass", ass_text)
+        zipf.writestr(f"{base_name}.json", json_text)
+    zip_bytes = zip_buffer.getvalue()
+
+    st.download_button(
+        label="📦 تحميل حزمة الترجمات كاملة (ZIP) - ينزل فوراً بجهازك بنقرة واحدة دون فتح بالمتصفح",
+        data=zip_bytes,
+        file_name=f"{base_name}_Subtitles_Package.zip",
+        mime="application/zip",
+        use_container_width=True
+    )
 
     col_d1, col_d2, col_d3, col_d4 = st.columns(4)
     with col_d1:
