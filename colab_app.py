@@ -267,6 +267,102 @@ def split_long_cue(cue: dict, max_duration: float = 5.5, max_words: int = 8) -> 
     return split_cues
 
 # ==========================================
+# دالة استخراج وإصلاح JSON التلقائية (مضادة للانقطاع وتجاوز التوكنات)
+# ==========================================
+def safe_parse_cues_json(raw_text: str) -> list:
+    """
+    استخراج وإصلاح بيانات JSON بمرونة فائقة:
+    1. إزالة كتل الماركداون والشوائب النصية.
+    2. فك الـ JSON القياسي إذا كان مكتملاً.
+    3. إصلاح الانقطاع التلقائي (Truncation Repair) إذا انقطع الرد عند السطر 400 أو 700.
+    4. صائد الأسطر الفائق (Regex Fallback) لاستخراج مئات الحوارات حتى مع وجود علامات اقتباس غير مهربة.
+    """
+    if not raw_text or not str(raw_text).strip():
+        return []
+    
+    text = str(raw_text).strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    elif text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    text = text.strip()
+
+    # المحاولة 1: الفك المباشر القياسي
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list) and len(parsed) > 0:
+            return parsed
+    except Exception:
+        pass
+
+    # المحاولة 2: ترميم الانقطاع التلقائي عند سقف التوكنات (Auto Truncation Repair)
+    repaired_text = text
+    last_brace_pos = repaired_text.rfind('}')
+    if last_brace_pos != -1:
+        repaired_text = repaired_text[:last_brace_pos + 1].strip()
+        if not repaired_text.endswith(']'):
+            repaired_text += '\n]'
+        try:
+            parsed = json.loads(repaired_text)
+            if isinstance(parsed, list) and len(parsed) > 0:
+                return parsed
+        except Exception:
+            pass
+
+    # المحاولة 3: صائد الأسطر الاحتياطي الفائق عبر التعبيرات النمطية (Regex Cue Extractor)
+    # يستخرج كل كائن حوار بشكل مستقل حتى لو تلفت بنية الـ JSON ككل بسبب علامة اقتباس داخلية
+    extracted_cues = []
+    cue_pattern = re.compile(
+        r'\{\s*"timecodeStart"\s*:\s*"([^"]+)"\s*,\s*"timecodeEnd"\s*:\s*"([^"]+)"\s*,\s*"arabicTranslation"\s*:\s*"((?:[^"\\]|\\.)*)"(?:\s*,\s*"type"\s*:\s*"([^"]*)")?\s*\}',
+        re.DOTALL
+    )
+    for m in cue_pattern.finditer(text):
+        try:
+            start_tc = m.group(1).strip()
+            end_tc = m.group(2).strip()
+            raw_ar = m.group(3)
+            if '\\u' in raw_ar:
+                raw_ar = raw_ar.encode('utf-8').decode('unicode_escape', 'ignore')
+            clean_ar = raw_ar.replace('\\"', '"').replace('\\n', ' ').strip()
+            c_type = m.group(4) or "dialogue"
+            if clean_ar:
+                extracted_cues.append({
+                    "timecodeStart": start_tc,
+                    "timecodeEnd": end_tc,
+                    "arabicTranslation": clean_ar,
+                    "type": c_type
+                })
+        except Exception:
+            continue
+
+    if extracted_cues:
+        return extracted_cues
+
+    # نمط أوسع للحماية القصوى
+    broad_pattern = re.compile(r'\{[^{}]*"(?:timecodeStart|arabicTranslation)"[^{}]*\}', re.DOTALL)
+    for m in broad_pattern.finditer(text):
+        item_text = m.group(0)
+        try:
+            item = json.loads(item_text)
+            if item.get("arabicTranslation") or item.get("timecodeStart"):
+                extracted_cues.append(item)
+        except Exception:
+            st_m = re.search(r'"timecodeStart"\s*:\s*"([^"]+)"', item_text)
+            en_m = re.search(r'"timecodeEnd"\s*:\s*"([^"]+)"', item_text)
+            ar_m = re.search(r'"arabicTranslation"\s*:\s*"([^"]*)"', item_text)
+            if st_m and ar_m:
+                extracted_cues.append({
+                    "timecodeStart": st_m.group(1).strip(),
+                    "timecodeEnd": en_m.group(1).strip() if en_m else "00:00.00",
+                    "arabicTranslation": ar_m.group(1).strip(),
+                    "type": "dialogue"
+                })
+
+    return extracted_cues
+
+# ==========================================
 # استخراج وترقية الصوت عبر FFmpeg
 # ==========================================
 def extract_and_enhance_audio(input_media_path: str, filter_type: str = "vocal_clean") -> str:
@@ -512,10 +608,10 @@ def translate_media_file(
 - الـ Hinglish: ({'احتفظ بنبرة الحوار المميزة' if preserve_hinglish else 'ترجم المعنى إلى الفصحى المباشرة'}).
 - أغاني الخلفية والراب: ({'ضع علامة ♪ في بداية ونهاية كل بيت شعري أو مقطع غنائي حقيقي' if translate_songs else 'ترجم الحوارات فقط'}).
 
-قاعدة التوقيت الحتمية الصارمة (Base-60):
+قاعدة التوقيت الحتمية الصارمة (Base-60) وسلامة الـ JSON:
 - أخرج التوقيت بصيغة نصية (MM:SS.ms) مثل "00:01.50" أو "01:25.80" حيث الدقيقة = 60 ثانية تماماً.
-- تجنب علامات الاقتباس المزدوجة داخل النصوص واستخدم الفاصلة العليا '...' أو «...».
-- أخرج الناتج حصراً بمصفوفة JSON صالحة ومطابقة للشكل التالي:
+- حظر قاطع لاستخدام علامات الاقتباس المزدوجة "..." داخل نصوص الحوارات، واستبدلها إلزامياً بالأقواس العربية «...» أو الفاصلة العلوية '...' لمنع كسر بنية الـ JSON.
+- أخرج الناتج بمصفوفة JSON مدمجة ونقية ومطابقة تماماً للشكل التالي:
 [
   {{
     "timecodeStart": "00:00.50",
@@ -610,28 +706,25 @@ def translate_media_file(
                         )
                     )
 
-                    text = resp.text.strip() if hasattr(resp, "text") and resp.text else ""
-                    if not text and hasattr(resp, "candidates") and resp.candidates:
+                    raw_text_cand = ""
+                    if hasattr(resp, "text") and resp.text:
+                        raw_text_cand = resp.text.strip()
+                    elif hasattr(resp, "candidates") and resp.candidates:
                         for cand in resp.candidates:
                             if hasattr(cand, "content") and hasattr(cand.content, "parts"):
                                 for part in cand.content.parts:
                                     if hasattr(part, "text") and part.text:
-                                        text += part.text
-                    text = text.strip()
-                    if text.startswith("```json"):
-                        text = text[7:]
-                    if text.startswith("```"):
-                        text = text[3:]
-                    if text.endswith("```"):
-                        text = text[:-3]
-                    text = text.strip()
+                                        raw_text_cand += part.text
+                        raw_text_cand = raw_text_cand.strip()
 
-                    parsed = json.loads(text)
-                    if isinstance(parsed, list) and len(parsed) > 0:
+                    parsed = safe_parse_cues_json(raw_text_cand)
+                    if parsed and isinstance(parsed, list) and len(parsed) > 0:
                         response = resp
                         raw_cues = parsed
                         successful_model = actual_model
                         break
+                    else:
+                        raise ValueError("لم يرجع النموذج أسطراً صالحة أو حدث انقطاع لم يمكن إصلاحه.")
                 except Exception as e:
                     last_err = e
                     err_str = str(e).lower()
