@@ -537,11 +537,11 @@ def translate_media_file(
     progress=gr.Progress()
 ):
     if not file_path:
-        return "❌ يرجى رفع ملف فيديو أو صوت أولاً.", None, None, None, ""
+        return "❌ يرجى رفع ملف فيديو أو صوت أولاً.", None, None, None, None, ""
 
     api_key = (api_key or os.environ.get("GEMINI_API_KEY", "")).strip()
     if not api_key:
-        return "❌ يرجى إدخال مفتاح Google AI Studio Gemini API للمتابعة.", None, None, None, ""
+        return "❌ يرجى إدخال مفتاح Google AI Studio Gemini API للمتابعة.", None, None, None, None, ""
 
     progress(0.05, desc="تهيئة الاتصال ومكتبة Google Gemini...")
     client = genai.Client(api_key=api_key)
@@ -946,6 +946,10 @@ with gr.Blocks(title="BollywoodSub AI - Google Colab Edition", css=custom_css, t
             )
 
             with gr.Accordion("🛠️ خيارات سينمائية متقدمة", open=False):
+                translate_songs_cb = gr.Checkbox(
+                    label="ترجمة أغاني وراب الخلفية مع نوتة شعرية 🎵",
+                    value=True
+                )
                 ignore_sound_effects_cb = gr.Checkbox(
                     label="استبعاد المؤثرات الصوتية والبيئية وسارجام (حوار وأغاني فقط)",
                     value=True

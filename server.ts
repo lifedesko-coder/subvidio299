@@ -103,6 +103,27 @@ async function startServer() {
     });
   });
 
+  // Direct download for Colab & Streamlit standalone scripts
+  app.get('/colab_app.py', (req, res) => {
+    const filePath = path.join(process.cwd(), 'colab_app.py');
+    if (fs.existsSync(filePath)) {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.sendFile(filePath);
+    } else {
+      res.status(404).send('colab_app.py not found');
+    }
+  });
+
+  app.get('/streamlit_app.py', (req, res) => {
+    const filePath = path.join(process.cwd(), 'streamlit_app.py');
+    if (fs.existsSync(filePath)) {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.sendFile(filePath);
+    } else {
+      res.status(404).send('streamlit_app.py not found');
+    }
+  });
+
   // Pre-configured sample Bollywood clips
   app.get('/api/samples', (req, res) => {
     const samplePath = '/samples/bollywood_demo.mp4';
