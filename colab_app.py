@@ -22,6 +22,8 @@ except ImportError:
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", "gradio"], check=True)
     import gradio as gr
 
+import zipfile
+
 try:
     from google import genai
     from google.genai import types
@@ -191,14 +193,16 @@ def wrap_subtitle_text(text: str, max_chars_per_line: int = 40) -> str:
     return text
 
 # ==========================================
-# دالة تجزئة الأسطر الطويلة ومنع تجاوز 5.5 ثوانٍ
+# دالة تجزئة الأسطر الطويلة ومنع تجاوز 5.5 ثوانٍ وحظر تكديس الكلام السريع (6-8 كلمات كحد أقصى)
 # ==========================================
-def split_long_cue(cue: dict, max_duration: float = 5.5, max_words: int = 13) -> list:
+def split_long_cue(cue: dict, max_duration: float = 5.5, max_words: int = 8) -> list:
     start = cue["start"]
     end = cue["end"]
     total_dur = end - start
     arabic_text = cue.get("arabic", "").strip()
     arabic_words = arabic_text.split()
+    
+    # الالتزام الصارم بقاعدة عدم دمج أكثر من 6 إلى 8 كلمات في سطر واحد
     if total_dur <= max_duration and len(arabic_words) <= max_words:
         return [cue]
 
@@ -218,7 +222,7 @@ def split_long_cue(cue: dict, max_duration: float = 5.5, max_words: int = 13) ->
     final_segments = []
     if len(merged_sentences) <= 1:
         words = arabic_words
-        chunk_size = max(5, min(max_words, 9))
+        chunk_size = max(4, min(max_words, 7))
         for i in range(0, len(words), chunk_size):
             chunk = " ".join(words[i:i + chunk_size])
             if chunk:
@@ -245,7 +249,7 @@ def split_long_cue(cue: dict, max_duration: float = 5.5, max_words: int = 13) ->
     for idx, seg in enumerate(final_segments):
         seg_words = max(1, len(seg.split()))
         fraction = seg_words / total_words
-        seg_duration = max(1.4, total_dur * fraction)
+        seg_duration = max(1.2, total_dur * fraction)
         seg_end = curr_start + seg_duration
         if idx == len(final_segments) - 1 or seg_end > end:
             seg_end = end
@@ -297,6 +301,56 @@ def extract_and_enhance_audio(input_media_path: str, filter_type: str = "vocal_c
     except Exception as e:
         print(f"تنبيه: فشل تشغيل فلتر FFmpeg المتقدم ({e})، سيتم إرسال الملف مباشرة.")
         return input_media_path
+
+# ==========================================
+# دمج نموذج Whisper لاستخراج التوقيت بالمللي ثانية ومحاذاة مشاهد الغضب
+# ==========================================
+def align_subtitles_with_whisper(audio_path: str, cues: list, enabled: bool = False, progress=None) -> list:
+    """
+    استخدام تقنية Whisper ASR لاكتشاف فترات التحدث الحقيقية (Voice Activity Detection)
+    ومحاذاة توقيتات الأسطر في مشاهد الصراخ والكلام السريع المتواصل.
+    """
+    if not enabled or not cues:
+        return cues
+    try:
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            if progress:
+                progress(0.88, desc="⚡ جاري تثبيت faster-whisper للمحاذاة بالمللي ثانية...")
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "faster-whisper"], check=True)
+            from faster_whisper import WhisperModel
+
+        if progress:
+            progress(0.90, desc="🎙️ تشغيل Whisper لمطابقة التوقيت بالمللي ثانية على صوت الممثلين...")
+
+        # تشغيل Whisper بأخف وأسرع نموذج (tiny) مع تفعيل كاشف الصوت VAD
+        model = WhisperModel("tiny", device="auto", compute_type="auto")
+        segments, _ = model.transcribe(
+            audio_path,
+            language="hi",
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=250)
+        )
+        whisper_intervals = []
+        for seg in segments:
+            whisper_intervals.append({"start": seg.start, "end": seg.end})
+
+        if whisper_intervals:
+            for cue in cues:
+                c_start = cue["start"]
+                c_end = cue["end"]
+                # البحث عن الفترات الصوتية المتطابقة
+                matches = [w for w in whisper_intervals if not (w["end"] < c_start or w["start"] > c_end + 1.2)]
+                if matches:
+                    actual_end = max(w["end"] for w in matches)
+                    # تمديد وقت نهاية السطر إذا كان الممثل لا يزال يتكلم بصوته
+                    if actual_end > cue["end"]:
+                        cue["end"] = round(actual_end + 0.35, 2)
+        return cues
+    except Exception as e:
+        print(f"تنبيه Whisper: تعذر إجراء المحاذاة التلقائية ({e})، سيتم الاعتماد على المحرك الحتمي المتقدم.")
+        return cues
 
 # ==========================================
 # توليد ملفات الترجمة (SRT, ASS, VTT)
@@ -382,6 +436,7 @@ def translate_media_file(
     translate_songs: bool,
     ignore_sound_effects: bool,
     enhance_audio: bool,
+    use_whisper_timestamps: bool = False,
     progress=gr.Progress()
 ):
     if not file_path:
@@ -421,17 +476,20 @@ def translate_media_file(
 """
 
     fast_speech_rule = """
-- تغطية الخط الزمني بالكامل للحلقة دون أي انقطاع (Full Timeline Coverage - 22+ Minutes):
-  * ترجم المقطع بشكل شامل وكامل، بداية من الثانية 00:00.00 وحتى نهاية آخر ثانية في الحلقة دون توقف أو اختصار.
-  * حظر قاطع لتفويت الحوارات العاطفية والمكررة: في مشاهد الصدمة أو البكاء أو المواجهات الدرامية، عندما يكرر الممثل عبارات مقتضبة أو أسئلة استنكارية (مثل: "أنت؟ أنت لست فلان؟"، "قل لي الحقيقة"، "لا.. لا يا فلان!")، يجب حتماً ترجمة كل كلمة وكل سطر بدقة ولا تهمل أي كلام بشري مكرر.
-  * أولوية مطلقة للكلام البشري فوق الموسيقى التصويرية: إذا تداخل كلام الممثل مع موسيقى تصويرية حزينة، كمان، أو أغنية درامية في الخلفية، فالكلام البشري هو الأولوية الأولى 100%، ويجب التقاط وترجمة كل ما يقوله الممثلون دون تفويت.
+- حظر قاطع لتكديس الكلام السريع والغاضب في سطر واحد (Strict Anti-Clustering for Fast & Angry Speech):
+  * في مشاهد الغضب، الصراخ، والمواجهات العاطفية التي يتحدث فيها الممثل بسرعة متواصلة وبدون توقف: يُحظر نهائياً دمج أكثر من 6 إلى 8 كلمات في سطر واحد!
+  * يُمنع منعاً باتاً دمج جمل المشهد التي تستمر 10 أو 15 ثانية في سطر واحد مدته 4 أو 5 ثوانٍ فقط ثم يختفي في صمت.
+  * قسّم الحوار المتواصل إلى أسطر قصيرة متتابعة ومقتضبة جداً (3 إلى 6 كلمات لكل سطر)، وحدد توقيت بداية ونهاية كل جملة مقتضبة بدقة تامة متزامنة مع خروج الصوت لحظة بلحظة.
+  * التغطية الزمنية الشاملة: إذا استمر الممثل في الصراخ أو الحديث من 00:10 إلى 00:22، يجب أن تولد أسطر ترجمة متتالية تغطي الفترة حتى 00:22 بالكامل ولا ينتهي توقيت السطر مبكراً ويترك الممثل يتحدث بدون ترجمة!
+  * حظر قاطع لتفويت الحوارات العاطفية والمكررة: في مشاهد الصدمة أو البكاء، عندما يكرر الممثل عبارات مقتضبة (مثل: "أنت؟ أنت لست فلان؟"، "قل لي الحقيقة"، "لا.. لا يا فلان!")، ترجم كل كلمة ولا تهمل أي كلام بشري.
+  * أولوية مطلقة للكلام البشري فوق الموسيقى التصويرية: إذا تداخل كلام الممثل مع موسيقى تصويرية حزينة أو كمان، فالكلام البشري هو الأولوية الأولى 100%.
 """
 
     sub_segmentation_rule = """
-- التزامن الشفهي الصارم وتمديد نهاية السطر (Strict Speech-Onset & Accurate Offset):
+- التزامن الشفهي الصارم وتوزيع الأسطر (Strict Speech-Onset & Accurate Offset):
   * قاعدة تطابق البداية: يجب أن يتطابق وقت بداية السطر (timecodeStart) بدقة متناهية مع لحظة نطق أول حرف يخرج من فم الممثل. يمنع ظهور السطر أثناء صمت الممثل قبل بدء الكلام.
   * قاعدة إتمام نهاية الكلام: يجب أن يستمر وقت انتهاء السطر (timecodeEnd) حتى إتمام الممثل نطق آخر حرف تماماً مع نبرة صوته وإغلاق شفتيه، دون إنهاء السطر مبكراً قبل أن يفرغ الممثل من جملته.
-  * منع الاختفاء الخاطف: اجعل السطر مريحاً للقراءة بالعربية (بين 1.5 إلى 4.5 ثوانٍ، وبحد أقصى 10 إلى 12 كلمة لكل سطر).
+  * منع الاختفاء الخاطف: اجعل السطر مريحاً للقراءة بالعربية (بين 1.5 إلى 4.5 ثوانٍ، وبحد أقصى 6 إلى 8 كلمات لكل سطر في المشاهد السريعة).
 """
 
     sargam_ban_rule = """
@@ -536,8 +594,8 @@ def translate_media_file(
                     retry_label = "" if attempt == 0 else f" (إعادة محاولة {attempt+1}/{max_retries} بعد ضغط مؤقت)..."
                     progress(0.55 + (idx * 0.05), desc=f"🎬 جاري التحليل بنموذج: {actual_model}{retry_label}")
                     
-                    # سعة التوكنات: 65536 للنماذج الكاملة لتغطية حلقة 22 دقيقة بالكامل
-                    token_limit = 8192 if "lite" in actual_model.lower() else 65536
+                    # سعة التوكنات: 8192 هو الحد الأقصى الرسمي المسموح به من Google لكافة نماذج Gemini
+                    token_limit = 8192
                     
                     resp = client.models.generate_content(
                         model=actual_model,
@@ -598,9 +656,9 @@ def translate_media_file(
             return (
                 f"❌ النموذج المختار ({selected_model}) يواجه ضغطاً مؤقتاً في خوادم Google (503 Service Unavailable).\n"
                 f"💡 الحل الموصى به: اختر نموذج gemini-3.5-flash أو gemini-3.6-flash من القائمة، فهما متوفران ومستقران حالياً ويغطيان كامل الحلقة (22 دقيقة) بسرعة فائقة ودون تقطيع.",
-                None, None, None, ""
+                None, None, None, None, ""
             )
-        return f"❌ تعذر استخراج الترجمة: {err_msg}", None, None, None, ""
+        return f"❌ تعذر استخراج الترجمة: {err_msg}", None, None, None, None, ""
 
     progress(0.85, desc="📐 تطبيق معادلات التوقيت Base-60 وتمديد نهايات السطور...")
 
@@ -654,13 +712,20 @@ def translate_media_file(
             else:
                 processed_cues[i]["end"] = round(max(processed_cues[i]["start"] + 1.0, processed_cues[i + 1]["start"] - 0.03), 2)
 
-    progress(0.95, desc="💾 حفظ وتجهيز ملفات الترجمة (SRT, ASS, VTT)...")
+    # محاذاة Whisper بالمللي ثانية في حال تم تفعيلها
+    if use_whisper_timestamps:
+        progress(0.92, desc="🎙️ تطبيق محاذاة Whisper بالمللي ثانية لمشاهد الغضب والكلام السريع...")
+        processed_cues = align_subtitles_with_whisper(media_to_send, processed_cues, enabled=True, progress=progress)
+        processed_cues.sort(key=lambda x: x["start"])
+
+    progress(0.95, desc="💾 حفظ وتجهيز ملفات الترجمة وحزمة ZIP المباشرة...")
 
     # حفظ الملفات في المجلد المؤقت للتحميل
     temp_dir = tempfile.gettempdir()
     srt_path = os.path.join(temp_dir, "BollywoodSub_Translation.srt")
     ass_path = os.path.join(temp_dir, "BollywoodSub_Golden_Cinema.ass")
     vtt_path = os.path.join(temp_dir, "BollywoodSub_Web.vtt")
+    zip_path = os.path.join(temp_dir, "BollywoodSub_Translation_Package.zip")
 
     srt_content = generate_srt_content(processed_cues)
     ass_content = generate_ass_content(processed_cues)
@@ -673,18 +738,26 @@ def translate_media_file(
     with open(vtt_path, "w", encoding="utf-8") as f:
         f.write(vtt_content)
 
+    # إنشاء حزمة ZIP للتحميل بضغطة واحدة على الهواتف دون فتح النص في المتصفح
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        zipf.write(srt_path, arcname="BollywoodSub_Translation.srt")
+        zipf.write(ass_path, arcname="BollywoodSub_Golden_Cinema.ass")
+        zipf.write(vtt_path, arcname="BollywoodSub_Web.vtt")
+
     progress(1.0, desc="✅ اكتملت الترجمة بنجاح!")
+
+    whisper_note = "نعم (محاذاة صوتية بالمللي ثانية)" if use_whisper_timestamps else "المحرك الحتمي الذكي (قاعدة 6-8 كلمات لمشاهد الغضب)"
 
     status_msg = f"""
 ### 🎉 تم إنجاز الترجمة السينمائية بنجاح!
 - **النموذج المستخدم:** `{successful_model}`
 - **عدد أسطر الحوار المترجمة:** `{len(processed_cues)}` سطراً
-- **تنسيق الأسطر:** معايير سينمائية (حد أقصى سطرين ≤ 42 حرفاً للسطر لمنع التحذيرات)
-- **تزامن نهاية الكلام:** تمديد ذكي (+0.40s Tail Extension) حتى نهاية صوت الممثل
+- **محاذاة المشاهد السريعة والغضب:** `{whisper_note}`
+- **تنسيق الأسطر:** معايير سينمائية (حد أقصى سطرين ≤ 40 حرفاً لمنع التحذيرات)
+- **حزمة التحميل الفوري:** متوفرة بصيغة ZIP للتنزيل المباشر في الهاتف بنقرة واحدة
 - **نظام التوقيت:** حتمي 100% Base-60 (دقيقة = 60 ثانية)
-- **تصفية المؤثرات وسارجام:** مفعلة مع حماية كلام الممثلين
 """
-    return status_msg, srt_path, ass_path, vtt_path, srt_content
+    return status_msg, zip_path, srt_path, ass_path, vtt_path, srt_content
 
 # ==========================================
 # واجهة Gradio الاحترافية
@@ -791,9 +864,10 @@ with gr.Blocks(title="BollywoodSub AI - Google Colab Edition", css=custom_css, t
                     label="الحفاظ على نبرة الـ Hinglish وشارع مومباي",
                     value=True
                 )
-                translate_songs_cb = gr.Checkbox(
-                    label="ترجمة الأغاني الشعرية ومقاطع الراب (مع علامة ♪)",
-                    value=True
+                whisper_cb = gr.Checkbox(
+                    label="🎙️ دمج محاذاة Whisper بالمللي ثانية (لأعلى دقة توقيت في مشاهد الصراخ والغضب)",
+                    value=False,
+                    info="يكتشف فترات التحدث الفعلية بدقة المللي ثانية ويربطها بترجمة Gemini السينمائية"
                 )
 
             translate_btn = gr.Button("🚀 بدء الترجمة السينمائية الفائقة", variant="primary", size="lg")
@@ -802,9 +876,11 @@ with gr.Blocks(title="BollywoodSub AI - Google Colab Edition", css=custom_css, t
             gr.Markdown("### 📥 نتائج وملفات الترجمة الجاهزة")
             status_output = gr.Markdown("في انتظار رفع الملف والضغط على زر البدء...")
 
+            zip_download = gr.File(label="📦 تحميل حزمة الترجمات كاملة (ZIP) - ينزل فوراً بجهازك بنقرة واحدة دون فتح بالمتصفح")
+
             with gr.Row():
                 srt_download = gr.File(label="⬇️ تحميل SRT القياسي")
-                ass_download = gr.File(label="⬇️ تحميل ASS بالخط الذهبي السينمائي")
+                ass_download = gr.File(label="⬇️ تحميل ASS بالخط الذهبي")
                 vtt_download = gr.File(label="⬇️ تحميل WebVTT")
 
             preview_text = gr.TextArea(
@@ -824,9 +900,10 @@ with gr.Blocks(title="BollywoodSub AI - Google Colab Edition", css=custom_css, t
             preserve_hinglish_cb,
             translate_songs_cb,
             ignore_sound_effects_cb,
-            enhance_audio_cb
+            enhance_audio_cb,
+            whisper_cb
         ],
-        outputs=[status_output, srt_download, ass_download, vtt_download, preview_text]
+        outputs=[status_output, zip_download, srt_download, ass_download, vtt_download, preview_text]
     )
 
 if __name__ == "__main__":
